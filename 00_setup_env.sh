@@ -47,7 +47,18 @@ ${CREATE} -y -n "${ENV_ANNO}" ${CH} funannotate
 # funannotate databases (UniProt, Pfam, BUSCO dikarya, ...)
 mkdir -p "${FUNANNOTATE_DB}"
 set +u; conda activate "${ENV_ANNO}"; set -u
-funannotate setup -i all -d "${FUNANNOTATE_DB}"
+# geneontology.org (and some mirrors) return 403 to Python's default
+# "Python-urllib" user agent, so run funannotate setup with a browser UA.
+# --force rebuilds everything so funannotate-db-info.txt is complete.
+export FUNANNOTATE_DB
+python - <<'PY'
+import os, sys, urllib.request as u
+o = u.build_opener(); o.addheaders = [("User-Agent", "Mozilla/5.0")]; u.install_opener(o)
+sys.argv = ["funannotate", "setup", "-i", "all", "--force", "-d", os.environ["FUNANNOTATE_DB"]]
+from funannotate.funannotate import main
+main()
+PY
+funannotate database
 set +u; conda deactivate; set -u
 
 echo "Environments ready:"
