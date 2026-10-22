@@ -72,7 +72,15 @@ activate_env() {
 
 # isolate name for this array task (1-based line of samples.txt)
 get_sample() {
-    sed -n "${SLURM_ARRAY_TASK_ID}p" "${SAMPLES}"
+    if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+        echo "ERROR: this is an array job. Submit it with sbatch, e.g.:" >&2
+        echo "  sbatch --array=1-\$(wc -l < ${SAMPLES}) $(basename "$0")" >&2
+        exit 1
+    fi
+    local s
+    s=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "${SAMPLES}")
+    [[ -n "$s" ]] || { echo "ERROR: no isolate on line ${SLURM_ARRAY_TASK_ID} of ${SAMPLES}" >&2; exit 1; }
+    echo "$s"
 }
 
 THREADS="${SLURM_CPUS_PER_TASK:-4}"

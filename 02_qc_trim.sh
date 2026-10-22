@@ -24,7 +24,7 @@ R2="${RAW_DIR}/${S}_R2.fq.gz"
 echo "Isolate: ${S}   $(date)"
 
 # 1. raw read quality
-fastqc -t "${THREADS}" -o "${QC_DIR}/fastqc_raw" "${R1}" "${R2}"
+fastqc -t "${THREADS}" --outdir "${QC_DIR}/fastqc_raw" "${R1}" "${R2}"
 
 # 2. adapter + quality trimming
 #    auto-detect adapters, trim 3' ends below Q20, drop reads < 50 bp
