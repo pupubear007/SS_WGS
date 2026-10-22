@@ -40,6 +40,10 @@ conda env list | grep -q "^${ENV_ASM} " || \
 ${CREATE} -y -n "${ENV_ASM}" ${CH} \
     spades rasusa seqkit quast busco orthofinder
 
+# 2b. QUAST alone on Python 3.11 (QUAST still imports distutils, removed in 3.12+)
+conda env list | grep -q "^pu_quast " || \
+${CREATE} -y -n pu_quast ${CH} python=3.11 quast
+
 # 3. annotation
 conda env list | grep -q "^${ENV_ANNO} " || \
 ${CREATE} -y -n "${ENV_ANNO}" ${CH} funannotate

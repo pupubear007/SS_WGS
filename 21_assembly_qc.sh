@@ -28,7 +28,10 @@ ASMS=( "${ASM_DIR}"/*.scaffolds.fa )
 echo "Assemblies: ${#ASMS[@]}"
 
 # 1. QUAST against the reference
-quast.py "${ASMS[@]}" -r "${REF}" --fungus --large -t "${THREADS}" -o quast \
+#    QUAST needs Python <=3.11 (it imports distutils), so it has its own env
+QUAST="$(conda info --base)/envs/pu_quast/bin/quast.py"
+[[ -x "${QUAST}" ]] || QUAST="quast.py"
+"${QUAST}" "${ASMS[@]}" -r "${REF}" --fungus --large -t "${THREADS}" -o quast \
     -l "$(printf '%s\n' "${ASMS[@]}" | xargs -n1 basename | sed 's/\.scaffolds\.fa//' | paste -sd,)"
 
 # 2. BUSCO (reference included as a benchmark)
