@@ -24,7 +24,8 @@ activate_env "${ENV_ANNO}"
 export FUNANNOTATE_DB
 
 S=$(get_sample)
-ASM="${ASM_DIR}/${S}.scaffolds.fa"
+ASM="${ASM_DIR}/clean/${S}.scaffolds.fa"        # decontaminated (step 20b)
+[[ -s "${ASM}" ]] || { echo "WARNING: no clean assembly for ${S}; using raw (run 20b first)"; ASM="${ASM_DIR}/${S}.scaffolds.fa"; }
 OUT="${ANNO_DIR}/${S}"
 mkdir -p "${OUT}"
 cd "${OUT}"
