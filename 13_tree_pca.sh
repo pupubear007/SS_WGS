@@ -46,11 +46,17 @@ for line in open("genotypes.tsv"):
         else:          seqs[i].append("N"); row.append(np.nan)
     mat.append(row)
 
+X = np.array(mat).T                                  # isolates x SNPs
+# keep only sites where both alleles are still present among called isolates
+# (needed for IQ-TREE +ASC; low-depth calls set to missing can leave a site invariant)
+has0 = np.nansum(X == 0, axis=0) > 0
+has1 = np.nansum(X == 1, axis=0) > 0
+var = has0 & has1
+print(f"dropped {int((~var).sum())} sites that became invariant after masking")
+X = X[:, var]
 with open("SS_WGS_snps.fasta", "w") as out:
     for s, sq in zip(samples, seqs):
-        out.write(f">{s}\n{''.join(sq)}\n")
-
-X = np.array(mat).T                                  # isolates x SNPs
+        out.write(f">{s}\n{''.join(c for c, k in zip(sq, var) if k)}\n")
 # pairwise SNP distance (sites where both called)
 n = len(samples)
 D = np.zeros((n, n), dtype=int)
@@ -69,7 +75,7 @@ Xi = np.where(np.isnan(X), col_mean, X) - col_mean
 U, S, Vt = np.linalg.svd(Xi, full_matrices=False)
 k = min(10, n)
 pcs = U[:, :k] * S[:k]
-var = S**2 / np.sum(S**2)
+pvar = S**2 / np.sum(S**2)
 with open("pca.tsv", "w") as out:
     out.write("isolate\t" + "\t".join(f"PC{i+1}" for i in range(k)) + "\n")
     for i, s in enumerate(samples):
@@ -77,8 +83,8 @@ with open("pca.tsv", "w") as out:
 with open("pca_variance.tsv", "w") as out:
     out.write("PC\tpct_variance\n")
     for i in range(k):
-        out.write(f"PC{i+1}\t{100*var[i]:.2f}\n")
-print(f"{n} isolates, {X.shape[1]} SNPs; PC1 {100*var[0]:.1f}%, PC2 {100*var[1]:.1f}%")
+        out.write(f"PC{i+1}\t{100*pvar[i]:.2f}\n")
+print(f"{n} isolates, {X.shape[1]} SNPs; PC1 {100*pvar[0]:.1f}%, PC2 {100*pvar[1]:.1f}%")
 PY
 
 # ---------- ML tree ----------

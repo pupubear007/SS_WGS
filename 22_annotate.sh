@@ -34,19 +34,27 @@ echo "Isolate: ${S}   $(date)"
 # contig names must be <= 16 characters for GenBank-style output
 SHORT=$(echo "${S}" | tr -cd '[:alnum:]' | cut -c1-10)
 
-# 1. remove duplicate small contigs, sort/rename, soft-mask repeats
-funannotate clean -i "${ASM}" -o "${S}.clean.fa" --minlen 1000 --cpus "${THREADS}"
-funannotate sort  -i "${S}.clean.fa" -o "${S}.sorted.fa" -b "${SHORT}" --minlen 1000
-funannotate mask  -i "${S}.sorted.fa" -o "${S}.masked.fa" --cpus "${THREADS}"
+# conda packages some funannotate helper scripts without execute permission
+FUN_PKG=$(python -c 'import funannotate, os; print(os.path.dirname(funannotate.__file__))')
+chmod u+x "${FUN_PKG}"/aux_scripts/*.py 2>/dev/null || true
+
+# 1. remove duplicate small contigs, sort/rename, soft-mask repeats (skipped if already done)
+[[ -s "${S}.clean.fa" ]]  || funannotate clean -i "${ASM}" -o "${S}.clean.fa" --minlen 1000 --cpus "${THREADS}"
+[[ -s "${S}.sorted.fa" ]] || funannotate sort  -i "${S}.clean.fa" -o "${S}.sorted.fa" -b "${SHORT}" --minlen 1000
+[[ -s "${S}.masked.fa" ]] || funannotate mask  -i "${S}.sorted.fa" -o "${S}.masked.fa" --cpus "${THREADS}"
 
 # 2. gene prediction
 #    Botrytis cinerea (closest Augustus model) seeds training.
+if ls "${OUT}/fun/predict_results/"*.proteins.fa >/dev/null 2>&1; then
+    echo "predict already finished for ${S}; skipping"
+else
 funannotate predict \
     -i "${S}.masked.fa" -o "${OUT}/fun" \
     -s "Sclerotinia sclerotiorum" --strain "${S}" \
     --busco_seed_species botrytis_cinerea \
     --protein_evidence "${REF_DIR}/Ss_ref_proteins.fa" "${FUNANNOTATE_DB}/uniprot_sprot.fasta" \
     --cpus "${THREADS}"
+fi
 
 # 3. functional annotation (Pfam, UniProt, MEROPS, CAZymes, GO via eggNOG if installed)
 funannotate annotate -i "${OUT}/fun" --cpus "${THREADS}"

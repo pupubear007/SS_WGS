@@ -1,0 +1,305 @@
+---
+title: "SS_WGS: *Sclerotinia sclerotiorum* whole-genome results"
+author: "Hsuan-Fu Wang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 6)
+
+pkgs <- c("ggplot2", "ape", "phangorn", "pheatmap", "ggrepel", "dplyr", "tidyr", "knitr", "scales")
+new  <- pkgs[!pkgs %in% rownames(installed.packages())]
+if (length(new)) install.packages(new)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+# ---- results folder downloaded from MSI (made by 30_collect_results.sh) ----
+base   <- path.expand("~/SS_WGS/results")
+figdir <- file.path(base, "figures"); dir.create(figdir, showWarnings = FALSE, recursive = TRUE)
+f   <- function(...) file.path(base, ...)
+has <- function(p) file.exists(p) && file.size(p) > 0
+
+# isolates whose raw assemblies carried bacterial contamination (step 20b)
+contaminated <- c("BN166","BN191","BobH_NEB","JS861","JS890",
+                  "MNSS1","MNSS2","MNSS5","MNSS10","NEB_274")
+
+# optional metadata: isolate,host,origin,year,aggressiveness,...
+meta <- if (has(f("isolate_metadata.csv"))) read.csv(f("isolate_metadata.csv")) else NULL
+colour_by <- if (!is.null(meta)) setdiff(names(meta), "isolate")[1] else NULL
+
+status <- function(p) if (has(p)) "✅" else "⏳ not yet"
+```
+
+# Getting the files
+
+**On MSI** (login node, ~1 min), gather all small result files:
+
+```bash
+cd /scratch.global/wan00965/Quick_test/script
+bash 30_collect_results.sh
+```
+
+**On your Mac**, download them (re-run both after new steps finish):
+
+```bash
+rsync -av wan00965@agate.msi.umn.edu:/scratch.global/wan00965/Quick_test/SS_WGS_analysis/SS_WGS_results/ ~/SS_WGS/results/
+```
+
+Optional: `~/SS_WGS/results/isolate_metadata.csv` with columns `isolate,host,origin,year,aggressiveness`.
+Plots are coloured by its first column after `isolate`.
+
+| Part | Status |
+|---|---|
+| QC (steps 02–03, 11) | `r status(f("qc", "coverage_per_isolate.tsv"))` |
+| Assembly + decontamination (20, 20b) | `r status(f("assembly", "decontam_summary.tsv"))` |
+| Assembly completeness (21) | `r status(f("assembly", "busco_summary.tsv"))` |
+| Variants + population (12–13) | `r status(f("popgen", "pca.tsv"))` |
+| Annotation (22) | `r status(f("annotation", "annotation_summary.tsv"))` |
+| Pangenome (23) | `r status(f("pangenome", "Orthogroups.GeneCount.tsv"))` |
+| Metadata | `r if (is.null(meta)) "⏳ add isolate_metadata.csv" else paste("✅ colouring by", colour_by)` |
+
+# Part A — Data quality
+
+## A1. Sequencing depth
+
+```{r coverage, eval=has(f("qc", "coverage_per_isolate.tsv"))}
+cov <- read.delim(f("qc", "coverage_per_isolate.tsv")) %>%
+  mutate(contaminated = isolate %in% contaminated)
+
+ggplot(cov, aes(reorder(isolate, trim_coverage_x), trim_coverage_x, fill = contaminated)) +
+  geom_col() + coord_flip() +
+  geom_hline(yintercept = 20, linetype = 2, colour = "grey40") +
+  scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick")) +
+  labs(x = NULL, y = "Coverage after trimming (x)", fill = "Contaminated",
+       title = "Sequencing depth per isolate (dashed line = 20x)") + theme_bw()
+```
+
+## A2. Mapping to the 1980 UF-70 reference
+
+```{r mapping, eval=has(f("qc", "mapping_rates.tsv"))}
+mp <- read.delim(f("qc", "mapping_rates.tsv")) %>% mutate(contaminated = isolate %in% contaminated)
+ggplot(mp, aes(reorder(isolate, mapped_pct), mapped_pct, fill = contaminated)) +
+  geom_col() + coord_flip(ylim = c(80, 100)) +
+  scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick")) +
+  labs(x = NULL, y = "Reads mapped (%)", fill = "Contaminated") + theme_bw()
+mp %>% arrange(mapped_pct) %>% kable()
+```
+
+# Part B — De novo assemblies
+
+## B1. Contamination (step 20b)
+
+```{r decontam, eval=has(f("assembly", "decontam_summary.tsv"))}
+dc <- read.delim(f("assembly", "decontam_summary.tsv"))
+dc %>% select(isolate, size_Mb, clean_Mb) %>%
+  pivot_longer(-isolate, names_to = "assembly", values_to = "Mb") %>%
+  mutate(assembly = recode(assembly, size_Mb = "raw", clean_Mb = "cleaned")) %>%
+  ggplot(aes(reorder(isolate, -Mb), Mb, colour = assembly)) +
+  geom_point(size = 2.5) + coord_flip() +
+  labs(x = NULL, y = "Assembly size (Mb)", title = "Assembly size before and after decontamination") +
+  theme_bw()
+dc %>% filter(removed_Mb > 1) %>%
+  select(isolate, size_Mb, removed_Mb, clean_Mb, top_contaminant_hits) %>% kable()
+```
+
+All contaminated isolates carry the same bacteria (*Acinetobacter*, *E. coli*, *Pseudomonas*),
+pointing to one shared source (reagent / extraction batch) rather than independent culture contamination.
+
+## B2. Completeness (BUSCO, step 21)
+
+```{r busco, eval=has(f("assembly", "busco_summary.tsv"))}
+bu <- read.delim(f("assembly", "busco_summary.tsv"))
+ggplot(bu, aes(reorder(assembly, complete_pct), complete_pct, fill = assembly %in% contaminated)) +
+  geom_col() + coord_flip(ylim = c(80, 100)) +
+  scale_fill_manual(values = c(`FALSE` = "steelblue", `TRUE` = "firebrick"), guide = "none") +
+  labs(x = NULL, y = "BUSCO complete (%)", title = "Gene-space completeness (leotiomycetes_odb10)") +
+  theme_bw()
+bu %>% arrange(desc(duplicated_pct)) %>% kable()
+```
+
+High **duplicated** % (> ~5%) would suggest a mixed culture of two *Sclerotinia* isolates.
+
+```{r quast, eval=has(f("assembly", "quast_report.tsv"))}
+q <- read.delim(f("assembly", "quast_report.tsv"), check.names = FALSE)
+keep <- intersect(c("Assembly", "# contigs", "Total length", "N50", "GC (%)",
+                    "Genome fraction (%)", "# mismatches per 100 kbp", "# indels per 100 kbp"), names(q))
+q[, keep] %>% kable(caption = "QUAST (raw assemblies vs. reference)")
+```
+
+## B3. Gene annotation (step 22)
+
+```{r anno, eval=has(f("annotation", "annotation_summary.tsv"))}
+an <- read.delim(f("annotation", "annotation_summary.tsv"))
+an %>% pivot_longer(-isolate, names_to = "category", values_to = "n") %>%
+  filter(category %in% c("genes", "secreted", "cazyme", "protease")) %>%
+  ggplot(aes(reorder(isolate, n), n)) + geom_col(fill = "darkseagreen4") + coord_flip() +
+  facet_wrap(~ category, scales = "free_x", nrow = 1) +
+  labs(x = NULL, y = "Number of genes", title = "Predicted genes and functional classes per isolate") +
+  theme_bw() + theme(axis.text.y = element_text(size = 6))
+an %>% arrange(desc(genes)) %>% kable()
+cat(sprintf("Annotated isolates: %d of 44. Genes per isolate: median %.0f (range %d–%d)\n",
+            nrow(an), median(an$genes), min(an$genes), max(an$genes)))
+```
+
+## B4. Pangenome (OrthoFinder, step 23)
+
+```{r pan, eval=has(f("pangenome", "Orthogroups.GeneCount.tsv")), fig.height=7}
+gc  <- read.delim(f("pangenome", "Orthogroups.GeneCount.tsv"), check.names = FALSE)
+ref <- grep("ref", names(gc), value = TRUE)
+iso_cols <- setdiff(names(gc), c("Orthogroup", "Total", ref))
+pa  <- as.matrix(gc[, iso_cols] > 0) * 1
+rownames(pa) <- gc$Orthogroup
+n   <- length(iso_cols); freq <- rowSums(pa)
+
+cls <- cut(freq / n, breaks = c(0, 0.15, 0.95, 0.999, 1),
+           labels = c("cloud (<15%)", "shell (15–95%)", "soft-core (95–99%)", "core (100%)"),
+           include.lowest = TRUE)
+pan <- data.frame(Orthogroup = gc$Orthogroup, n_isolates = freq, class = cls)
+pan_tab <- pan %>% filter(n_isolates > 0) %>% count(class)
+kable(pan_tab, caption = sprintf("Orthogroups across %d isolates", n))
+
+ggplot(pan %>% filter(n_isolates > 0), aes(n_isolates)) +
+  geom_histogram(binwidth = 1, fill = "grey50") +
+  labs(x = "Number of isolates with the orthogroup", y = "Orthogroups",
+       title = "Gene-family frequency (right peak = core genome)") + theme_bw()
+
+# accessory (variable) gene families: presence/absence heatmap
+acc <- pa[freq > 0 & freq < n, , drop = FALSE]
+if (nrow(acc) > 1) {
+  ann <- if (!is.null(meta) && !is.null(colour_by))
+    data.frame(row.names = iso_cols, group = meta[[colour_by]][match(iso_cols, meta$isolate)]) else NA
+  pheatmap(t(acc), show_colnames = FALSE, color = c("grey95", "darkblue"), legend = FALSE,
+           clustering_method = "ward.D2", fontsize_row = 6, annotation_row = ann,
+           main = sprintf("Accessory gene families (%d) — presence/absence", nrow(acc)),
+           filename = file.path(figdir, "accessory_presence_absence.pdf"), width = 10, height = 8)
+  pheatmap(t(acc), show_colnames = FALSE, color = c("grey95", "darkblue"), legend = FALSE,
+           clustering_method = "ward.D2", fontsize_row = 6, annotation_row = ann,
+           main = sprintf("Accessory gene families (%d) — presence/absence", nrow(acc)))
+}
+
+# isolate-specific genes (singletons not in any orthogroup)
+if (has(f("pangenome", "Orthogroups_UnassignedGenes.tsv"))) {
+  un <- read.delim(f("pangenome", "Orthogroups_UnassignedGenes.tsv"), check.names = FALSE)
+  uniq <- sapply(iso_cols, function(c) sum(nzchar(un[[c]]), na.rm = TRUE))
+  data.frame(isolate = names(uniq), isolate_specific_genes = uniq) %>%
+    ggplot(aes(reorder(isolate, isolate_specific_genes), isolate_specific_genes,
+               fill = isolate %in% contaminated)) +
+    geom_col() + coord_flip() +
+    scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick"), guide = "none") +
+    labs(x = NULL, y = "Genes found only in this isolate",
+         title = "Isolate-specific genes (red: had contamination — check these carefully)") + theme_bw()
+}
+write.csv(pan, file.path(base, "pangenome_orthogroup_classes.csv"), row.names = FALSE)
+```
+
+# Part C — Reference-based variants and population structure
+
+## C1. PCA
+
+```{r pca, eval=has(f("popgen", "pca.tsv"))}
+pca  <- read.delim(f("popgen", "pca.tsv"))
+pvar <- read.delim(f("popgen", "pca_variance.tsv"))
+pca$contaminated <- pca$isolate %in% contaminated
+if (!is.null(meta)) pca <- left_join(pca, meta, by = "isolate")
+lab <- function(i) sprintf("PC%d (%.1f%%)", i, pvar$pct_variance[i])
+
+plot_pc <- function(x, y) {
+  ggplot(pca, aes(.data[[paste0("PC", x)]], .data[[paste0("PC", y)]])) +
+    { if (is.null(colour_by)) geom_point(size = 3, colour = "grey30")
+      else geom_point(aes(colour = .data[[colour_by]]), size = 3) } +
+    geom_point(data = subset(pca, contaminated), shape = 21, size = 5, stroke = 0.8, colour = "red") +
+    geom_text_repel(aes(label = isolate), size = 2.6, max.overlaps = 50) +
+    labs(x = lab(x), y = lab(y), caption = "Red ring: raw assembly had bacterial contamination") +
+    theme_bw()
+}
+p12 <- plot_pc(1, 2); p12
+ggsave(file.path(figdir, "PCA_PC1_PC2.pdf"), p12, width = 8, height = 6.5)
+plot_pc(1, 3)
+ggplot(pvar[1:min(10, nrow(pvar)), ], aes(factor(PC, levels = PC), pct_variance)) +
+  geom_col(fill = "grey50") + labs(x = NULL, y = "% variance", title = "Scree plot") + theme_bw()
+```
+
+## C2. Phylogeny (IQ-TREE, 1000 ultrafast bootstraps)
+
+```{r model, eval=has(f("popgen", "SS_WGS_snps.iqtree"))}
+cat(grep("Best-fit model", readLines(f("popgen", "SS_WGS_snps.iqtree")), value = TRUE), sep = "\n")
+```
+
+```{r tree, eval=has(f("popgen", "SS_WGS_snps.treefile")), fig.height=10}
+tr <- phangorn::midpoint(read.tree(f("popgen", "SS_WGS_snps.treefile")))
+tip_col <- if (!is.null(meta) && !is.null(colour_by)) {
+  grp <- meta[[colour_by]][match(tr$tip.label, meta$isolate)]
+  lv  <- unique(na.omit(grp)); pal <- setNames(hue_pal()(length(lv)), lv)
+  ifelse(is.na(grp), "black", pal[as.character(grp)])
+} else ifelse(tr$tip.label %in% contaminated, "red", "black")
+
+draw_tree <- function() {
+  plot(tr, cex = 0.75, tip.color = tip_col, no.margin = TRUE, label.offset = 0.0005)
+  bs <- suppressWarnings(as.numeric(tr$node.label))
+  nodelabels(ifelse(!is.na(bs) & bs >= 95, "*", ""), frame = "none", cex = 0.9, col = "grey20")
+  add.scale.bar(cex = 0.6)
+}
+draw_tree()
+pdf(file.path(figdir, "tree.pdf"), width = 7, height = 10); draw_tree(); invisible(dev.off())
+```
+
+`*` = bootstrap ≥ 95; midpoint-rooted.
+
+## C3. Pairwise SNP distances and clonality
+
+```{r dist, eval=has(f("popgen", "snp_distance.tsv")), fig.height=8}
+dist <- as.matrix(read.delim(f("popgen", "snp_distance.tsv"), row.names = 1, check.names = FALSE))
+hm <- function(file = NA) pheatmap(dist, clustering_distance_rows = as.dist(dist),
+        clustering_distance_cols = as.dist(dist), fontsize = 6, main = "Pairwise SNP differences",
+        filename = file, width = 9, height = 8)
+hm(); hm(file.path(figdir, "snp_distance_heatmap.pdf"))
+
+d <- dist[upper.tri(dist)]
+cat(sprintf("Pairwise SNP differences: median %.0f, min %.0f, max %.0f\n", median(d), min(d), max(d)))
+ggplot(data.frame(d = d), aes(d)) + geom_histogram(bins = 60, fill = "grey50") +
+  labs(x = "Pairwise SNP differences", y = "Isolate pairs",
+       title = "Distribution of pairwise distances (left peak = clonal pairs)") + theme_bw()
+
+cp <- which(dist < 1000 & upper.tri(dist), arr.ind = TRUE)
+if (nrow(cp)) {
+  data.frame(isolate_a = rownames(dist)[cp[, 1]], isolate_b = colnames(dist)[cp[, 2]], SNPs = dist[cp]) %>%
+    arrange(SNPs) %>% kable(caption = "Near-identical pairs (< 1000 SNPs): possible clones")
+} else cat("No pairs closer than 1000 SNPs.\n")
+```
+
+## C4. Genes with high/moderate-impact variants (SnpEff)
+
+```{r effects, eval=has(f("variants", "high_moderate_effects.tsv")) && has(f("popgen", "isolates.txt"))}
+iso <- readLines(f("popgen", "isolates.txt"))
+eff <- read.delim(f("variants", "high_moderate_effects.tsv"), header = FALSE,
+                  col.names = c("chrom", "pos", "ref", "alt", "effect", "impact", "gene", "hgvs_p", "gt")) %>%
+  distinct(chrom, pos, alt, gene, .keep_all = TRUE)
+gt <- do.call(rbind, strsplit(sub(",$", "", eff$gt), ","))
+colnames(gt) <- iso
+eff$n_carriers <- rowSums(gt == "1", na.rm = TRUE)
+
+eff %>% count(impact, effect, sort = TRUE) %>% kable(caption = "Variant effects (PASS variants)")
+eff %>% filter(impact == "HIGH", n_carriers > 0, n_carriers < length(iso)) %>%
+  group_by(gene) %>%
+  summarise(high_variants = n(), effects = paste(unique(effect), collapse = "; "),
+            max_carriers = max(n_carriers)) %>%
+  arrange(desc(high_variants)) %>% head(50) %>%
+  kable(caption = "Top genes with segregating HIGH-impact variants")
+write.csv(cbind(eff[, 1:8], n_carriers = eff$n_carriers, gt),
+          file.path(base, "variant_effects_by_isolate.csv"), row.names = FALSE)
+```
+
+`variant_effects_by_isolate.csv`: one row per variant, one column per isolate (`1` = carries ALT) —
+ready for comparing high- vs low-aggressiveness or host-specific isolates.
+
+# Session info
+
+```{r session}
+sessionInfo()
+```

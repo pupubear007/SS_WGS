@@ -78,6 +78,7 @@ fi
 bcftools view -f PASS -m2 -M2 -v snps SS_WGS.filtered.vcf.gz \
   | bcftools +setGT -- -t q -n . -i 'FMT/DP<5' \
   | bcftools view -i 'F_MISSING<0.1' \
+  | bcftools +fill-tags -- -t AC,AN \
   | bcftools view --min-ac 1:minor -Oz -o SS_WGS.snps.clean.vcf.gz
 bcftools index -t SS_WGS.snps.clean.vcf.gz
 
