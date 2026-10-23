@@ -29,13 +29,13 @@ N_OK=0; N_MISS=0
 # cp_f SRC DEST_DIR [NEW_NAME] : copy one file if it exists
 cp_f() {
     local src="$1" dst="$2" name="${3:-$(basename "$1")}"
-    if [[ -s "${src}" ]]; then cp -p "${src}" "${dst}/${name}"; N_OK=$((N_OK+1))
+    if [[ -s "${src}" ]]; then cp -pf "${src}" "${dst}/${name}"; N_OK=$((N_OK+1))
     else echo "  - missing: ${src#${PROJECT}/}"; N_MISS=$((N_MISS+1)); fi
 }
 # cp_g DEST_DIR GLOB... : copy every file matching the globs (quiet if none)
 cp_g() {
     local dst="$1"; shift; local n=0 f
-    for f in "$@"; do [[ -f "$f" ]] && cp -p "$f" "${dst}/" && n=$((n+1)); done
+    for f in "$@"; do [[ -f "$f" ]] && cp -pf "$f" "${dst}/" && n=$((n+1)); done
     echo "  + ${dst#${OUT}/}: ${n} files"; N_OK=$((N_OK+n))
 }
 
@@ -78,7 +78,6 @@ for f in SS_WGS.filtered.vcf.gz SS_WGS.PASS.vcf.gz SS_WGS.snps.clean.vcf.gz SS_W
     [[ -s "${VCF_DIR}/${f}.tbi" ]] && cp -p "${VCF_DIR}/${f}.tbi" "${OUT}/variants/"
 done
 cp_f "${VCF_DIR}/SS_WGS.PASS.bcftools_stats.txt"   "${OUT}/variants" bcftools_stats.txt
-cp_f "${VCF_DIR}/SS_WGS.high_moderate_effects.tsv" "${OUT}/variants" high_moderate_effects.tsv
 cp_g "${OUT}/variants" "${VCF_DIR}"/SS_WGS.snpeff_summary* "${VCF_DIR}"/*snpEff_genes.txt "${VCF_DIR}"/*snpeff*genes.txt
 
 # ---------- population ----------
@@ -155,7 +154,7 @@ if summary:
     empty = [c for i, c in enumerate(["with_interpro","with_eggnog","with_GO","secreted","membrane"], start=4)
              if all(r[i] == 0 for r in summary)]
     if empty:
-        print("  ! columns empty for every isolate (tool not run in step 22):", ", ".join(empty))
+        print("  (funannotate did not add", ", ".join(empty) + "; secreted / InterPro / KOG labels come from gene_level/gene_info.tsv, step 14)")
 PY
 # keep the old flat layout too, so the current report still finds them
 cp -p "${OUT}"/annotation/per_isolate/*/*.annotations.tsv "${OUT}/annotation/" 2>/dev/null || true
