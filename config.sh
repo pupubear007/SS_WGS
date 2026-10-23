@@ -74,7 +74,8 @@ activate_env() {
 get_sample() {
     if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
         echo "ERROR: this is an array job. Submit it with sbatch, e.g.:" >&2
-        echo "  sbatch --array=1-\$(wc -l < ${SAMPLES}) $(basename "$0")" >&2
+        local name="${SLURM_JOB_NAME:-$(basename "$0")}"
+        echo "  sbatch --array=1-$(wc -l < "${SAMPLES}" 2>/dev/null || echo N) ${name%.sh}.sh" >&2
         exit 1
     fi
     local s

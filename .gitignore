@@ -1,1 +1,6 @@
 .DS_Store
+results/
+rnaseq_DE/
+*.html
+.Rhistory
+Rmd/old/

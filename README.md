@@ -1,51 +1,66 @@
-# SS_WGS pipeline — *Sclerotinia sclerotiorum* whole-genome analysis (MSI)
+# SS_WGS — *Sclerotinia sclerotiorum* whole-genome analysis (44 isolates, MSI)
 
-All steps are SLURM jobs. Run every command from this folder; logs go to `log/`.
-Edit paths only in `config.sh`. The reference is kept in `/scratch.global/wan00965/reference/Ss_1980_UF70`.
+Whole-genome sequencing of 44 *S. sclerotiorum* isolates: read QC, reference-based variant calling
+and population structure, de novo assembly and annotation, pangenome, and gene-level variation keyed
+to the JGI `SS1G_` gene IDs used in the soybean / sunflower dual RNA-seq.
+
+All steps are SLURM jobs run from this folder; logs go to `log/`. Paths are set only in `config.sh`.
+Reference: *S. sclerotiorum* 1980 UF-70, JGI MycoCosm Sclsc1 (same as the RNA-seq).
 
 ## Run order
 
 ```bash
 mkdir -p log
-bash   00a_install_miniforge.sh        # once: your own current conda + mamba
-sbatch 00_setup_env.sh                 # once: conda envs + funannotate DB
-bash   00b_get_reference.sh jgi        # once: reference -> /scratch.global/wan00965/reference (or: ... ncbi)
-bash   01_make_sample_list.sh          # prints N = number of isolates
+# --- one-time setup ---
+bash   00a_install_miniforge.sh        # own conda + mamba in ~/miniforge3
+sbatch 00_setup_env.sh                 # conda envs + funannotate databases
+bash   00b_get_reference.sh jgi        # reference -> /scratch.global/wan00965/reference/Ss_1980_UF70
+bash   01_make_sample_list.sh          # samples.txt; prints N (number of isolates)
 
 # --- QC ---
-sbatch --array=1-N 02_qc_trim.sh       # FastQC + fastp trimming
+sbatch --array=1-N 02_qc_trim.sh       # FastQC + fastp
 sbatch 03_qc_summary.sh                # coverage table + MultiQC
 
-# --- Reference-based ---
-sbatch 10_ref_prep.sh                  # index reference + SnpEff DB
+# --- reference-based ---
+sbatch 10_ref_prep.sh                  # index reference
 sbatch --array=1-N 11_align_call.sh    # bwa-mem2 + markdup + HaplotypeCaller (ploidy 1)
-sbatch 12_joint_genotype.sh            # joint genotyping, filters, SnpEff
+sbatch 12_joint_genotype.sh            # joint genotyping + hard filters
 sbatch 13_tree_pca.sh                  # IQ-TREE phylogeny, PCA, SNP distances
+sbatch 14_gene_level.sh                # SnpEff effects, gene deletions, gene function (SS1G_ IDs)
 
-# --- De novo ---  (can run in parallel with the reference-based steps)
-sbatch --array=1-N 20_assemble.sh      # SPAdes per isolate
-sbatch 21_assembly_qc.sh               # QUAST + BUSCO
-sbatch --array=1-N 22_annotate.sh      # funannotate gene models + function
-sbatch 23_orthofinder.sh               # core / accessory genes across isolates
+# --- de novo --- (can run in parallel with the reference-based steps)
+sbatch --array=1-N 20_assemble.sh      # SPAdes
+sbatch 20b_decontaminate.sh            # remove non-Sclerotinia contigs, name the contaminant
+sbatch --time=48:00:00 21_assembly_qc.sh   # QUAST + BUSCO
+sbatch --array=1-N 22_annotate.sh      # funannotate (uses the cleaned assemblies)
+sbatch 23_orthofinder.sh               # pangenome: core / accessory gene families
+
+# --- results ---
+bash   30_collect_results.sh           # gather results -> SS_WGS_analysis/SS_WGS_results/
 ```
 
-Wait for each step to finish before the next one in its branch. To chain
-automatically: `sbatch --dependency=afterok:<JOBID> next_step.sh`.
+Then on the Mac:
 
-## Where to look
+```bash
+rsync -av wan00965@agate.msi.umn.edu:/scratch.global/wan00965/Quick_test/SS_WGS_analysis/SS_WGS_results/ ~/SS_WGS/results/
+```
 
-| Question | File |
+and knit `Rmd/SS_WGS_results.Rmd` in RStudio.
+
+## Folder layout
+
+| Path | Contents |
 |---|---|
-| Read quality, coverage per isolate | `01_qc/multiqc_report.html`, `01_qc/seqkit/coverage_per_isolate.tsv` |
-| Mapping rate / depth per isolate | `03_align/*.flagstat.txt`, `*.coverage_summary.txt` |
-| Variants with gene effects | `05_vcf/SS_WGS.PASS.snpeff.vcf.gz`, `SS_WGS.high_moderate_effects.tsv` |
-| Relationships among isolates | `06_popgen/SS_WGS_snps.treefile`, `pca.tsv`, `snp_distance.tsv` |
-| Assembly quality | `08_assembly_qc/quast/report.html`, `busco_summary.tsv` |
-| Gene content differences | `10_orthofinder/.../Orthogroups.GeneCount.tsv` |
+| `00_…`–`30_…`, `config.sh` | the pipeline (MSI) |
+| `raw_file_manage/` | gather / merge / download the raw FASTQ (run before the pipeline) |
+| `Rmd/SS_WGS_results.Rmd` | report: clonal lineages, RNA-seq isolates in genomic context, Xtra7 vs SSPotter, gene deletions, protein-changing variation, link to RNA-seq DE genes, phenotype vs genotype |
+| `rnaseq_DE/` | pathogen DE lists from the dual RNA-seq, written by `~/RNAseq_paper/CH5_DE_tables/gather_DE_tables.py` (not tracked in git) |
+| `results/` | downloaded results (not tracked in git) |
+| `tools/` | optional utilities (`31_inventory.sh`: list every file the pipeline produced, as a SLURM job) |
 
 ## Notes
 - *S. sclerotiorum* is haploid → GATK `-ploidy 1`.
-- Assemblies are downsampled to 100x before SPAdes.
-- funannotate runs without GeneMark (licensed); add it later if wanted.
-- Effector prediction (SignalP + EffectorP) and antiSMASH can be run on the
-  `22_annotate` protein files as a follow-up.
+- 10 isolates (library series CKDN2600112xx) carried bacterial DNA (*Acinetobacter*, *E. coli*, *Pseudomonas*);
+  `20b` removes it before annotation. Variant calling is unaffected (bacterial reads do not map).
+- Genes with low read depth in Model_1980 (the reference strain) are treated as unmappable, not deleted.
+- funannotate runs without GeneMark; secreted-protein / KOG / InterPro labels come from the JGI annotation files (step 14).

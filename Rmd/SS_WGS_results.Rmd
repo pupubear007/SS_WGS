@@ -1,305 +1,479 @@
 ---
-title: "SS_WGS: *Sclerotinia sclerotiorum* whole-genome results"
+title: "Genomic variation behind aggressiveness differences in *Sclerotinia sclerotiorum*"
+subtitle: "Whole-genome sequencing of 44 isolates, linked to the soybean RNA-seq isolates"
 author: "Hsuan-Fu Wang"
 date: "`r Sys.Date()`"
 output:
   html_document:
     toc: true
     toc_float: true
+    toc_depth: 3
     code_folding: hide
     df_print: paged
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      fig.width = 8, fig.height = 6)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 8, fig.height = 6)
 
-pkgs <- c("ggplot2", "ape", "phangorn", "pheatmap", "ggrepel", "dplyr", "tidyr", "knitr", "scales")
+pkgs <- c("ggplot2", "ape", "phangorn", "pheatmap", "ggrepel", "dplyr", "tidyr", "knitr", "scales", "vegan")
 new  <- pkgs[!pkgs %in% rownames(installed.packages())]
 if (length(new)) install.packages(new)
 invisible(lapply(pkgs, library, character.only = TRUE))
 
-# ---- results folder downloaded from MSI (made by 30_collect_results.sh) ----
-base   <- path.expand("~/SS_WGS/results")
-figdir <- file.path(base, "figures"); dir.create(figdir, showWarnings = FALSE, recursive = TRUE)
+# ---------------- inputs ----------------
+base      <- path.expand("~/SS_WGS/results")        # downloaded from MSI (30_collect_results.sh)
+rnaseq_dir <- path.expand("~/SS_WGS/rnaseq_DE")      # Ch3 pathogen DE tables (csv/tsv), optional
+meta_file <- file.path(base, "isolate_metadata.csv") # optional: isolate,host,origin,year,<phenotypes>
+CLONE_SNPS <- 1000                                   # isolates closer than this = same clonal lineage
+DEL_COV    <- 0.1                                    # relative gene depth below this = gene deleted
+
+out_dir <- file.path(base, "report_tables"); dir.create(out_dir, showWarnings = FALSE)
+figdir  <- file.path(base, "figures");       dir.create(figdir,  showWarnings = FALSE)
 f   <- function(...) file.path(base, ...)
 has <- function(p) file.exists(p) && file.size(p) > 0
 
-# isolates whose raw assemblies carried bacterial contamination (step 20b)
-contaminated <- c("BN166","BN191","BobH_NEB","JS861","JS890",
-                  "MNSS1","MNSS2","MNSS5","MNSS10","NEB_274")
+# ---------------- RNA-seq isolates (Ch3) ----------------
+rnaseq <- data.frame(
+  isolate   = c("WISS47", "JS659", "Xtra7", "MNSS6", "SSPotter", "BN172"),
+  phenotype = c("Low aggressive", "Low aggressive", "High aggressive", "High aggressive",
+                "Soybean-specific", "Sunflower-specific"))
+pheno_col <- c(`Low aggressive` = "#2c7bb6", `High aggressive` = "#d7191c",
+               `Soybean-specific` = "#1a9641", `Sunflower-specific` = "#fdae61")
+R6 <- rnaseq$isolate
 
-# optional metadata: isolate,host,origin,year,aggressiveness,...
-meta <- if (has(f("isolate_metadata.csv"))) read.csv(f("isolate_metadata.csv")) else NULL
-colour_by <- if (!is.null(meta)) setdiff(names(meta), "isolate")[1] else NULL
+meta <- if (has(meta_file)) read.csv(meta_file, check.names = FALSE) else NULL
 
-status <- function(p) if (has(p)) "✅" else "⏳ not yet"
+# ---------------- core data ----------------
+dist <- as.matrix(read.delim(f("popgen", "snp_distance.tsv"), row.names = 1, check.names = FALSE))
+iso  <- rownames(dist)
+
+# clonal lineages: single-linkage groups of isolates < CLONE_SNPS apart
+hc <- hclust(as.dist(dist), method = "single")
+cl <- cutree(hc, h = CLONE_SNPS)
+sz <- table(cl)
+lin_order <- names(sort(sz, decreasing = TRUE))
+lineage <- setNames(paste0("L", match(as.character(cl), lin_order)), names(cl))
+lineage_size <- setNames(as.integer(sz[as.character(cl)]), names(cl))
+lineage[lineage_size == 1] <- "singleton"
+
+# gene-level data from 14_gene_level.sh (optional until that step is run)
+gl <- function(x) f("gene_level", x)
+HAVE_GL <- has(gl("variant_effects.tsv.gz"))
+if (HAVE_GL) {
+  ve <- read.delim(gzfile(gl("variant_effects.tsv.gz")),
+                   colClasses = c(ref = "character", alt = "character", genotypes = "character",
+                                  hgvs_c = "character", hgvs_p = "character", distance = "character"))
+  vcf_iso <- colnames(read.delim(gl("gene_isolate_HIGH.tsv"), nrows = 1, check.names = FALSE))[-1]
+  gpos <- setNames(seq_along(vcf_iso), vcf_iso)
+  gt_of <- function(ids) sapply(ids, function(s) substr(ve$genotypes, gpos[[s]], gpos[[s]]))
+  ginfo <- read.delim(gl("gene_info.tsv"), colClasses = c(kog_class = "character", interpro = "character",
+                                                          kegg = "character", kog_def = "character"))
+}
+HAVE_COV <- has(gl("gene_isolate_relcov.tsv"))
+if (HAVE_COV) {
+  relcov <- as.matrix(read.delim(gl("gene_isolate_relcov.tsv"), row.names = 1, check.names = FALSE))
+  # genes with low depth in Model_1980 (the reference strain itself) cannot be mapped reliably
+  # (repeats, multi-copy families) -> not callable as deletions in any isolate
+  ref_iso <- intersect(c("Model_1980"), colnames(relcov))
+  n_unmappable <- if (length(ref_iso)) sum(relcov[, ref_iso] < 0.5) else 0
+  if (length(ref_iso)) relcov <- relcov[relcov[, ref_iso] >= 0.5, , drop = FALSE]
+}
+fun_of <- function(g) {
+  if (!HAVE_GL) return(rep("", length(g)))
+  i <- match(g, ginfo$gene)
+  lab <- ifelse(nzchar(ginfo$interpro[i]), ginfo$interpro[i], ginfo$kog_def[i])
+  lab[is.na(lab)] <- ""
+  paste0(ifelse(!is.na(i) & ginfo$cys_rich_SSP[i] == 1, "[Cys-rich SSP] ",
+                ifelse(!is.na(i) & ginfo$small_secreted[i] == 1, "[SSP] ",
+                       ifelse(!is.na(i) & ginfo$signalP[i] == 1, "[secreted] ", ""))), substr(lab, 1, 90))
+}
+status <- function(ok) if (ok) "✅" else "⏳ not yet"
 ```
 
-# Getting the files
-
-**On MSI** (login node, ~1 min), gather all small result files:
-
-```bash
-cd /scratch.global/wan00965/Quick_test/script
-bash 30_collect_results.sh
-```
-
-**On your Mac**, download them (re-run both after new steps finish):
-
-```bash
-rsync -av wan00965@agate.msi.umn.edu:/scratch.global/wan00965/Quick_test/SS_WGS_analysis/SS_WGS_results/ ~/SS_WGS/results/
-```
-
-Optional: `~/SS_WGS/results/isolate_metadata.csv` with columns `isolate,host,origin,year,aggressiveness`.
-Plots are coloured by its first column after `isolate`.
-
-| Part | Status |
+| Input | Status |
 |---|---|
-| QC (steps 02–03, 11) | `r status(f("qc", "coverage_per_isolate.tsv"))` |
-| Assembly + decontamination (20, 20b) | `r status(f("assembly", "decontam_summary.tsv"))` |
-| Assembly completeness (21) | `r status(f("assembly", "busco_summary.tsv"))` |
-| Variants + population (12–13) | `r status(f("popgen", "pca.tsv"))` |
-| Annotation (22) | `r status(f("annotation", "annotation_summary.tsv"))` |
-| Pangenome (23) | `r status(f("pangenome", "Orthogroups.GeneCount.tsv"))` |
-| Metadata | `r if (is.null(meta)) "⏳ add isolate_metadata.csv" else paste("✅ colouring by", colour_by)` |
+| Population genetics (steps 12–13) | `r status(TRUE)` |
+| Gene-level variation (step 14) | `r status(HAVE_GL)` |
+| Gene deletions / copy number (step 14) | `r status(HAVE_COV)` |
+| Ch3 RNA-seq DE tables (`~/SS_WGS/rnaseq_DE/`) | `r status(dir.exists(rnaseq_dir) && length(list.files(rnaseq_dir, "\\.(csv|tsv|txt)$")) > 0)` |
+| Isolate metadata (`isolate_metadata.csv`) | `r status(!is.null(meta))` |
 
-# Part A — Data quality
+# Key findings
 
-## A1. Sequencing depth
-
-```{r coverage, eval=has(f("qc", "coverage_per_isolate.tsv"))}
-cov <- read.delim(f("qc", "coverage_per_isolate.tsv")) %>%
-  mutate(contaminated = isolate %in% contaminated)
-
-ggplot(cov, aes(reorder(isolate, trim_coverage_x), trim_coverage_x, fill = contaminated)) +
-  geom_col() + coord_flip() +
-  geom_hline(yintercept = 20, linetype = 2, colour = "grey40") +
-  scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick")) +
-  labs(x = NULL, y = "Coverage after trimming (x)", fill = "Contaminated",
-       title = "Sequencing depth per isolate (dashed line = 20x)") + theme_bw()
+```{r key-numbers, echo=FALSE}
+n_lin  <- length(unique(cl)); n_clonal <- sum(lineage != "singleton")
+d6 <- dist[R6, R6]
+pair_xs <- dist["Xtra7", "SSPotter"]
+d_low <- dist["WISS47", "JS659"]
+nn <- function(s) { d <- dist[s, setdiff(iso, s)]; names(which.min(d)) }
 ```
 
-## A2. Mapping to the 1980 UF-70 reference
+- **Highly clonal population.** The `r length(iso)` isolates fall into **`r n_lin` clonal lineages** (< `r CLONE_SNPS` SNPs apart); `r n_clonal` isolates share a lineage with at least one other isolate. The largest lineage holds `r max(sz)` isolates.
+- **Aggressiveness phenotype does not follow lineage.** The high-aggressive generalist **Xtra7** and the soybean-specific **SSPotter** are near-clones (**`r pair_xs` SNPs**), while the two low-aggressive isolates WISS47 and JS659 are among the most distant pairs (**`r format(d_low, big.mark=",")` SNPs**).
+- So differences in aggressiveness and host range arise **within** clonal backgrounds, from a small number of variants, gene gains/losses, or regulation — the mechanisms the RNA-seq can see. Sections 3–6 list those candidate genes.
+- JS659 is near-identical to the reference strain 1980 (`r dist["JS659", "Model_1980"]` SNPs to Model_1980) — worth confirming against culture records.
 
-```{r mapping, eval=has(f("qc", "mapping_rates.tsv"))}
-mp <- read.delim(f("qc", "mapping_rates.tsv")) %>% mutate(contaminated = isolate %in% contaminated)
-ggplot(mp, aes(reorder(isolate, mapped_pct), mapped_pct, fill = contaminated)) +
-  geom_col() + coord_flip(ylim = c(80, 100)) +
-  scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick")) +
-  labs(x = NULL, y = "Reads mapped (%)", fill = "Contaminated") + theme_bw()
-mp %>% arrange(mapped_pct) %>% kable()
+# 1. Population structure
+
+## 1.1 Clonal lineages
+
+```{r lineages}
+lin_tab <- data.frame(isolate = iso, lineage = lineage[iso], size = lineage_size[iso]) %>%
+  mutate(rnaseq = ifelse(isolate %in% R6, rnaseq$phenotype[match(isolate, R6)], "")) %>%
+  group_by(lineage) %>%
+  summarise(n = n(), isolates = paste(sort(isolate), collapse = ", "),
+            RNAseq_isolates = paste(na.omit(ifelse(rnaseq != "", paste0(isolate, " (", rnaseq, ")"), NA)), collapse = "; "),
+            max_within_SNPs = if (n() > 1 && lineage[1] != "singleton") max(dist[isolate, isolate]) else NA_real_) %>%
+  arrange(desc(n))
+kable(lin_tab)
+write.csv(lin_tab, file.path(out_dir, "clonal_lineages.csv"), row.names = FALSE)
 ```
 
-# Part B — De novo assemblies
-
-## B1. Contamination (step 20b)
-
-```{r decontam, eval=has(f("assembly", "decontam_summary.tsv"))}
-dc <- read.delim(f("assembly", "decontam_summary.tsv"))
-dc %>% select(isolate, size_Mb, clean_Mb) %>%
-  pivot_longer(-isolate, names_to = "assembly", values_to = "Mb") %>%
-  mutate(assembly = recode(assembly, size_Mb = "raw", clean_Mb = "cleaned")) %>%
-  ggplot(aes(reorder(isolate, -Mb), Mb, colour = assembly)) +
-  geom_point(size = 2.5) + coord_flip() +
-  labs(x = NULL, y = "Assembly size (Mb)", title = "Assembly size before and after decontamination") +
-  theme_bw()
-dc %>% filter(removed_Mb > 1) %>%
-  select(isolate, size_Mb, removed_Mb, clean_Mb, top_contaminant_hits) %>% kable()
+```{r dist-hist, fig.height=4}
+d <- dist[upper.tri(dist)]
+ggplot(data.frame(d = d), aes(d + 1)) + geom_histogram(bins = 60, fill = "grey50") +
+  geom_vline(xintercept = CLONE_SNPS, linetype = 2, colour = "red") +
+  scale_x_log10(labels = comma) +
+  labs(x = "Pairwise SNP differences (log scale)", y = "Isolate pairs",
+       title = "Two classes of isolate pairs: clonal (left) and unrelated (right)",
+       subtitle = sprintf("Dashed line: lineage threshold (%d SNPs)", CLONE_SNPS)) + theme_bw()
 ```
 
-All contaminated isolates carry the same bacteria (*Acinetobacter*, *E. coli*, *Pseudomonas*),
-pointing to one shared source (reagent / extraction batch) rather than independent culture contamination.
+## 1.2 Phylogeny
 
-## B2. Completeness (BUSCO, step 21)
-
-```{r busco, eval=has(f("assembly", "busco_summary.tsv"))}
-bu <- read.delim(f("assembly", "busco_summary.tsv"))
-ggplot(bu, aes(reorder(assembly, complete_pct), complete_pct, fill = assembly %in% contaminated)) +
-  geom_col() + coord_flip(ylim = c(80, 100)) +
-  scale_fill_manual(values = c(`FALSE` = "steelblue", `TRUE` = "firebrick"), guide = "none") +
-  labs(x = NULL, y = "BUSCO complete (%)", title = "Gene-space completeness (leotiomycetes_odb10)") +
-  theme_bw()
-bu %>% arrange(desc(duplicated_pct)) %>% kable()
-```
-
-High **duplicated** % (> ~5%) would suggest a mixed culture of two *Sclerotinia* isolates.
-
-```{r quast, eval=has(f("assembly", "quast_report.tsv"))}
-q <- read.delim(f("assembly", "quast_report.tsv"), check.names = FALSE)
-keep <- intersect(c("Assembly", "# contigs", "Total length", "N50", "GC (%)",
-                    "Genome fraction (%)", "# mismatches per 100 kbp", "# indels per 100 kbp"), names(q))
-q[, keep] %>% kable(caption = "QUAST (raw assemblies vs. reference)")
-```
-
-## B3. Gene annotation (step 22)
-
-```{r anno, eval=has(f("annotation", "annotation_summary.tsv"))}
-an <- read.delim(f("annotation", "annotation_summary.tsv"))
-an %>% pivot_longer(-isolate, names_to = "category", values_to = "n") %>%
-  filter(category %in% c("genes", "secreted", "cazyme", "protease")) %>%
-  ggplot(aes(reorder(isolate, n), n)) + geom_col(fill = "darkseagreen4") + coord_flip() +
-  facet_wrap(~ category, scales = "free_x", nrow = 1) +
-  labs(x = NULL, y = "Number of genes", title = "Predicted genes and functional classes per isolate") +
-  theme_bw() + theme(axis.text.y = element_text(size = 6))
-an %>% arrange(desc(genes)) %>% kable()
-cat(sprintf("Annotated isolates: %d of 44. Genes per isolate: median %.0f (range %d–%d)\n",
-            nrow(an), median(an$genes), min(an$genes), max(an$genes)))
-```
-
-## B4. Pangenome (OrthoFinder, step 23)
-
-```{r pan, eval=has(f("pangenome", "Orthogroups.GeneCount.tsv")), fig.height=7}
-gc  <- read.delim(f("pangenome", "Orthogroups.GeneCount.tsv"), check.names = FALSE)
-ref <- grep("ref", names(gc), value = TRUE)
-iso_cols <- setdiff(names(gc), c("Orthogroup", "Total", ref))
-pa  <- as.matrix(gc[, iso_cols] > 0) * 1
-rownames(pa) <- gc$Orthogroup
-n   <- length(iso_cols); freq <- rowSums(pa)
-
-cls <- cut(freq / n, breaks = c(0, 0.15, 0.95, 0.999, 1),
-           labels = c("cloud (<15%)", "shell (15–95%)", "soft-core (95–99%)", "core (100%)"),
-           include.lowest = TRUE)
-pan <- data.frame(Orthogroup = gc$Orthogroup, n_isolates = freq, class = cls)
-pan_tab <- pan %>% filter(n_isolates > 0) %>% count(class)
-kable(pan_tab, caption = sprintf("Orthogroups across %d isolates", n))
-
-ggplot(pan %>% filter(n_isolates > 0), aes(n_isolates)) +
-  geom_histogram(binwidth = 1, fill = "grey50") +
-  labs(x = "Number of isolates with the orthogroup", y = "Orthogroups",
-       title = "Gene-family frequency (right peak = core genome)") + theme_bw()
-
-# accessory (variable) gene families: presence/absence heatmap
-acc <- pa[freq > 0 & freq < n, , drop = FALSE]
-if (nrow(acc) > 1) {
-  ann <- if (!is.null(meta) && !is.null(colour_by))
-    data.frame(row.names = iso_cols, group = meta[[colour_by]][match(iso_cols, meta$isolate)]) else NA
-  pheatmap(t(acc), show_colnames = FALSE, color = c("grey95", "darkblue"), legend = FALSE,
-           clustering_method = "ward.D2", fontsize_row = 6, annotation_row = ann,
-           main = sprintf("Accessory gene families (%d) — presence/absence", nrow(acc)),
-           filename = file.path(figdir, "accessory_presence_absence.pdf"), width = 10, height = 8)
-  pheatmap(t(acc), show_colnames = FALSE, color = c("grey95", "darkblue"), legend = FALSE,
-           clustering_method = "ward.D2", fontsize_row = 6, annotation_row = ann,
-           main = sprintf("Accessory gene families (%d) — presence/absence", nrow(acc)))
-}
-
-# isolate-specific genes (singletons not in any orthogroup)
-if (has(f("pangenome", "Orthogroups_UnassignedGenes.tsv"))) {
-  un <- read.delim(f("pangenome", "Orthogroups_UnassignedGenes.tsv"), check.names = FALSE)
-  uniq <- sapply(iso_cols, function(c) sum(nzchar(un[[c]]), na.rm = TRUE))
-  data.frame(isolate = names(uniq), isolate_specific_genes = uniq) %>%
-    ggplot(aes(reorder(isolate, isolate_specific_genes), isolate_specific_genes,
-               fill = isolate %in% contaminated)) +
-    geom_col() + coord_flip() +
-    scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick"), guide = "none") +
-    labs(x = NULL, y = "Genes found only in this isolate",
-         title = "Isolate-specific genes (red: had contamination — check these carefully)") + theme_bw()
-}
-write.csv(pan, file.path(base, "pangenome_orthogroup_classes.csv"), row.names = FALSE)
-```
-
-# Part C — Reference-based variants and population structure
-
-## C1. PCA
-
-```{r pca, eval=has(f("popgen", "pca.tsv"))}
-pca  <- read.delim(f("popgen", "pca.tsv"))
-pvar <- read.delim(f("popgen", "pca_variance.tsv"))
-pca$contaminated <- pca$isolate %in% contaminated
-if (!is.null(meta)) pca <- left_join(pca, meta, by = "isolate")
-lab <- function(i) sprintf("PC%d (%.1f%%)", i, pvar$pct_variance[i])
-
-plot_pc <- function(x, y) {
-  ggplot(pca, aes(.data[[paste0("PC", x)]], .data[[paste0("PC", y)]])) +
-    { if (is.null(colour_by)) geom_point(size = 3, colour = "grey30")
-      else geom_point(aes(colour = .data[[colour_by]]), size = 3) } +
-    geom_point(data = subset(pca, contaminated), shape = 21, size = 5, stroke = 0.8, colour = "red") +
-    geom_text_repel(aes(label = isolate), size = 2.6, max.overlaps = 50) +
-    labs(x = lab(x), y = lab(y), caption = "Red ring: raw assembly had bacterial contamination") +
-    theme_bw()
-}
-p12 <- plot_pc(1, 2); p12
-ggsave(file.path(figdir, "PCA_PC1_PC2.pdf"), p12, width = 8, height = 6.5)
-plot_pc(1, 3)
-ggplot(pvar[1:min(10, nrow(pvar)), ], aes(factor(PC, levels = PC), pct_variance)) +
-  geom_col(fill = "grey50") + labs(x = NULL, y = "% variance", title = "Scree plot") + theme_bw()
-```
-
-## C2. Phylogeny (IQ-TREE, 1000 ultrafast bootstraps)
-
-```{r model, eval=has(f("popgen", "SS_WGS_snps.iqtree"))}
-cat(grep("Best-fit model", readLines(f("popgen", "SS_WGS_snps.iqtree")), value = TRUE), sep = "\n")
-```
-
-```{r tree, eval=has(f("popgen", "SS_WGS_snps.treefile")), fig.height=10}
+```{r tree, fig.height=10}
 tr <- phangorn::midpoint(read.tree(f("popgen", "SS_WGS_snps.treefile")))
-tip_col <- if (!is.null(meta) && !is.null(colour_by)) {
-  grp <- meta[[colour_by]][match(tr$tip.label, meta$isolate)]
-  lv  <- unique(na.omit(grp)); pal <- setNames(hue_pal()(length(lv)), lv)
-  ifelse(is.na(grp), "black", pal[as.character(grp)])
-} else ifelse(tr$tip.label %in% contaminated, "red", "black")
-
+lv <- sort(unique(lineage[lineage != "singleton"]))
+lin_col <- setNames(hue_pal()(length(lv)), lv); lin_col["singleton"] <- "grey40"
+tipc <- lin_col[lineage[tr$tip.label]]
 draw_tree <- function() {
-  plot(tr, cex = 0.75, tip.color = tip_col, no.margin = TRUE, label.offset = 0.0005)
+  plot(tr, cex = 0.75, tip.color = tipc, font = ifelse(tr$tip.label %in% R6, 2, 1),
+       no.margin = TRUE, label.offset = 0.004)
   bs <- suppressWarnings(as.numeric(tr$node.label))
   nodelabels(ifelse(!is.na(bs) & bs >= 95, "*", ""), frame = "none", cex = 0.9, col = "grey20")
+  k <- match(R6, tr$tip.label)
+  tiplabels(tip = k, pch = 21, bg = pheno_col[rnaseq$phenotype], col = "black", cex = 1.6)
+  legend("bottomleft", legend = names(pheno_col), pt.bg = pheno_col, pch = 21, bty = "n",
+         cex = 0.75, title = "RNA-seq isolates")
   add.scale.bar(cex = 0.6)
 }
 draw_tree()
-pdf(file.path(figdir, "tree.pdf"), width = 7, height = 10); draw_tree(); invisible(dev.off())
+pdf(file.path(figdir, "tree_lineages_rnaseq.pdf"), width = 7.5, height = 10); draw_tree(); invisible(dev.off())
 ```
 
-`*` = bootstrap ≥ 95; midpoint-rooted.
+Tip colours = clonal lineage; **bold + dot** = RNA-seq isolates (dot colour = phenotype); `*` = bootstrap ≥ 95.
 
-## C3. Pairwise SNP distances and clonality
+## 1.3 PCA
 
-```{r dist, eval=has(f("popgen", "snp_distance.tsv")), fig.height=8}
-dist <- as.matrix(read.delim(f("popgen", "snp_distance.tsv"), row.names = 1, check.names = FALSE))
-hm <- function(file = NA) pheatmap(dist, clustering_distance_rows = as.dist(dist),
-        clustering_distance_cols = as.dist(dist), fontsize = 6, main = "Pairwise SNP differences",
-        filename = file, width = 9, height = 8)
-hm(); hm(file.path(figdir, "snp_distance_heatmap.pdf"))
-
-d <- dist[upper.tri(dist)]
-cat(sprintf("Pairwise SNP differences: median %.0f, min %.0f, max %.0f\n", median(d), min(d), max(d)))
-ggplot(data.frame(d = d), aes(d)) + geom_histogram(bins = 60, fill = "grey50") +
-  labs(x = "Pairwise SNP differences", y = "Isolate pairs",
-       title = "Distribution of pairwise distances (left peak = clonal pairs)") + theme_bw()
-
-cp <- which(dist < 1000 & upper.tri(dist), arr.ind = TRUE)
-if (nrow(cp)) {
-  data.frame(isolate_a = rownames(dist)[cp[, 1]], isolate_b = colnames(dist)[cp[, 2]], SNPs = dist[cp]) %>%
-    arrange(SNPs) %>% kable(caption = "Near-identical pairs (< 1000 SNPs): possible clones")
-} else cat("No pairs closer than 1000 SNPs.\n")
+```{r pca}
+pca  <- read.delim(f("popgen", "pca.tsv")); pvar <- read.delim(f("popgen", "pca_variance.tsv"))
+pca$lineage <- lineage[pca$isolate]
+pca$rnaseq  <- rnaseq$phenotype[match(pca$isolate, R6)]
+lab <- function(i) sprintf("PC%d (%.1f%%)", i, pvar$pct_variance[i])
+p <- ggplot(pca, aes(PC1, PC2)) +
+  geom_point(aes(colour = lineage), size = 2.5, alpha = 0.8) +
+  geom_point(data = subset(pca, !is.na(rnaseq)), aes(fill = rnaseq), shape = 21, size = 5, stroke = 1) +
+  geom_text_repel(data = subset(pca, !is.na(rnaseq)), aes(label = isolate), size = 3.2, fontface = "bold") +
+  scale_colour_manual(values = lin_col) + scale_fill_manual(values = pheno_col, name = "RNA-seq isolate") +
+  labs(x = lab(1), y = lab(2), colour = "Clonal lineage") + theme_bw()
+p
+ggsave(file.path(figdir, "PCA_lineages_rnaseq.pdf"), p, width = 8.5, height = 6.5)
 ```
 
-## C4. Genes with high/moderate-impact variants (SnpEff)
+# 2. The six RNA-seq isolates in genomic context
 
-```{r effects, eval=has(f("variants", "high_moderate_effects.tsv")) && has(f("popgen", "isolates.txt"))}
-iso <- readLines(f("popgen", "isolates.txt"))
-eff <- read.delim(f("variants", "high_moderate_effects.tsv"), header = FALSE,
-                  col.names = c("chrom", "pos", "ref", "alt", "effect", "impact", "gene", "hgvs_p", "gt")) %>%
-  distinct(chrom, pos, alt, gene, .keep_all = TRUE)
-gt <- do.call(rbind, strsplit(sub(",$", "", eff$gt), ","))
-colnames(gt) <- iso
-eff$n_carriers <- rowSums(gt == "1", na.rm = TRUE)
-
-eff %>% count(impact, effect, sort = TRUE) %>% kable(caption = "Variant effects (PASS variants)")
-eff %>% filter(impact == "HIGH", n_carriers > 0, n_carriers < length(iso)) %>%
-  group_by(gene) %>%
-  summarise(high_variants = n(), effects = paste(unique(effect), collapse = "; "),
-            max_carriers = max(n_carriers)) %>%
-  arrange(desc(high_variants)) %>% head(50) %>%
-  kable(caption = "Top genes with segregating HIGH-impact variants")
-write.csv(cbind(eff[, 1:8], n_carriers = eff$n_carriers, gt),
-          file.path(base, "variant_effects_by_isolate.csv"), row.names = FALSE)
+```{r six-heatmap, fig.width=6.5, fig.height=5.5}
+ann <- data.frame(row.names = R6, phenotype = rnaseq$phenotype, lineage = lineage[R6])
+pheatmap(d6, display_numbers = format(d6, big.mark = ","), number_color = "black", fontsize_number = 8,
+         annotation_row = ann, annotation_col = ann, color = colorRampPalette(c("white", "grey30"))(50),
+         annotation_colors = list(phenotype = pheno_col, lineage = lin_col[unique(lineage[R6])]),
+         main = "Pairwise SNP differences among the RNA-seq isolates")
 ```
 
-`variant_effects_by_isolate.csv`: one row per variant, one column per isolate (`1` = carries ALT) —
-ready for comparing high- vs low-aggressiveness or host-specific isolates.
+```{r six-table}
+six <- rnaseq %>% mutate(
+  lineage = lineage[isolate], lineage_size = lineage_size[isolate],
+  nearest_isolate = sapply(isolate, nn),
+  SNPs_to_nearest = sapply(isolate, function(s) min(dist[s, setdiff(iso, s)])),
+  lineage_mates = sapply(isolate, function(s) paste(setdiff(names(lineage)[lineage == lineage[s] & lineage != "singleton"], s), collapse = ", ")))
+kable(six)
+write.csv(six, file.path(out_dir, "rnaseq_isolates_genomic_context.csv"), row.names = FALSE)
 
-# Session info
+within_low  <- dist["WISS47", "JS659"]; within_high <- dist["Xtra7", "MNSS6"]
+between <- as.vector(dist[c("WISS47", "JS659"), c("Xtra7", "MNSS6")])
+```
 
-```{r session}
+Isolates with the **same** phenotype are not genetically closer: low-aggressive pair `r format(within_low, big.mark=",")` SNPs, high-aggressive pair `r format(within_high, big.mark=",")` SNPs, versus low/high pairs `r paste(format(range(between), big.mark=","), collapse = " to ")` SNPs. Phenotype is therefore not a property of genetic background.
+
+# 3. A near-clonal pair with different phenotypes: Xtra7 vs SSPotter
+
+Xtra7 (high-aggressive generalist) and SSPotter (soybean-specific) differ by only **`r pair_xs` SNPs** genome-wide. Any genomic cause of their phenotypic difference must be among these few variants or in gene-content differences — a short, testable candidate list.
+
+```{r pair-function}
+pair_diff <- function(a, b, cats = c("HIGH", "MODERATE", "LOW", "promoter1kb", "genic_noncoding")) {
+  ga <- substr(ve$genotypes, gpos[[a]], gpos[[a]]); gb <- substr(ve$genotypes, gpos[[b]], gpos[[b]])
+  k <- ga %in% c("0", "1") & gb %in% c("0", "1") & ga != gb & ve$category %in% cats
+  out <- ve[k, c("chrom", "pos", "ref", "alt", "gene", "category", "effect", "hgvs_p")]
+  out[[a]] <- ifelse(ga[k] == "1", "ALT", "ref"); out[[b]] <- ifelse(gb[k] == "1", "ALT", "ref")
+  out$function_ <- fun_of(out$gene)
+  out[order(match(out$category, c("HIGH", "MODERATE", "promoter1kb", "LOW", "genic_noncoding"))), ]
+}
+```
+
+```{r xtra7-ssp, eval=HAVE_GL}
+xs <- pair_diff("Xtra7", "SSPotter")
+xs_counts <- count(xs, category, name = "variants")
+kable(xs_counts, caption = "Variants in or near genes that differ between Xtra7 and SSPotter")
+kable(subset(xs, category %in% c("HIGH", "MODERATE", "promoter1kb")),
+      caption = "Candidate genes: protein-changing or promoter (≤1 kb) differences", row.names = FALSE)
+write.csv(xs, file.path(out_dir, "Xtra7_vs_SSPotter_variants.csv"), row.names = FALSE)
+```
+
+```{r xtra7-ssp-cov, eval=HAVE_COV}
+cn <- relcov[, c("Xtra7", "SSPotter")]
+cd <- data.frame(gene = rownames(cn), Xtra7 = cn[, 1], SSPotter = cn[, 2]) %>%
+  filter((Xtra7 < DEL_COV & SSPotter >= 0.5) | (SSPotter < DEL_COV & Xtra7 >= 0.5) |
+         (pmax(Xtra7, SSPotter) >= 1.8 & pmin(Xtra7, SSPotter) < 1.3)) %>%
+  mutate(difference = case_when(Xtra7 < DEL_COV ~ "absent in Xtra7", SSPotter < DEL_COV ~ "absent in SSPotter",
+                                Xtra7 >= 1.8 ~ "extra copy in Xtra7", TRUE ~ "extra copy in SSPotter"),
+         function_ = fun_of(gene))
+kable(cd, digits = 2, caption = "Gene presence / copy-number differences between Xtra7 and SSPotter", row.names = FALSE)
+write.csv(cd, file.path(out_dir, "Xtra7_vs_SSPotter_gene_content.csv"), row.names = FALSE)
+```
+
+# 4. Gene content variation (deletions and duplications)
+
+Relative read depth per reference gene (1 = single copy, ~0 = deleted, ≥ 1.8 = duplicated). `r if (HAVE_COV) sprintf("%d genes with low depth in Model_1980 (the reference strain itself, so unmappable rather than deleted) are excluded, leaving %s genes.", n_unmappable, format(nrow(relcov), big.mark=",")) else ""`
+
+```{r cov-summary, eval=HAVE_COV}
+iso_cov <- intersect(colnames(relcov), iso)
+del <- relcov[, iso_cov] < DEL_COV; dup <- relcov[, iso_cov] >= 1.8
+per_iso <- data.frame(isolate = iso_cov, genes_deleted = colSums(del), genes_duplicated = colSums(dup),
+                      lineage = lineage[iso_cov], rnaseq = rnaseq$phenotype[match(iso_cov, R6)])
+ggplot(per_iso, aes(reorder(isolate, genes_deleted), genes_deleted, fill = !is.na(rnaseq))) +
+  geom_col() + coord_flip() + scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick"),
+                                                labels = c("other", "RNA-seq isolate"), name = NULL) +
+  labs(x = NULL, y = "Reference genes absent (relative depth < 0.1)") + theme_bw()
+
+variable <- rowSums(del) > 0 & rowSums(del) < ncol(del)
+cat(sprintf("%d reference genes are absent from some isolates but present in others (%d absent from all).\n",
+            sum(variable), sum(rowSums(del) == ncol(del))))
+```
+
+```{r cov-heatmap, eval=HAVE_COV, fig.height=7}
+if (sum(variable) > 1) {
+  m <- (relcov[variable, iso_cov] >= DEL_COV) * 1
+  annc <- data.frame(row.names = iso_cov, lineage = lineage[iso_cov],
+                     RNAseq = ifelse(iso_cov %in% R6, rnaseq$phenotype[match(iso_cov, R6)], "other"))
+  pheatmap(m, show_rownames = sum(variable) <= 60, fontsize_row = 6, fontsize_col = 7,
+           color = c("white", "darkblue"), legend = FALSE, annotation_col = annc,
+           annotation_colors = list(lineage = lin_col, RNAseq = c(pheno_col, other = "grey90")),
+           main = sprintf("%d variably present reference genes (blue = present)", sum(variable)))
+}
+```
+
+```{r cov-function, eval=HAVE_COV && HAVE_GL}
+gi <- ginfo[match(rownames(relcov), ginfo$gene), ]
+enrich <- function(flag, label) {
+  ok <- !is.na(flag); t <- table(factor(variable[ok], c(FALSE, TRUE)), factor(flag[ok] == 1, c(FALSE, TRUE)))
+  ft <- fisher.test(t)
+  data.frame(gene_class = label, variable_genes_in_class = t[2, 2], variable_total = sum(t[2, ]),
+             pct_variable = 100 * t[2, 2] / sum(t[2, ]), pct_all_genes = 100 * sum(t[, 2]) / sum(t),
+             odds_ratio = unname(ft$estimate), p = ft$p.value)
+}
+kable(rbind(enrich(gi$signalP, "Secreted (SignalP)"), enrich(gi$small_secreted, "Small secreted (≤300 aa)"),
+            enrich(gi$cys_rich_SSP, "Cys-rich small secreted")), digits = 3,
+      caption = "Are variably present genes enriched for secreted / effector-like proteins?")
+```
+
+```{r cov-rnaseq, eval=HAVE_COV}
+d6m <- relcov[, R6] < DEL_COV
+v6 <- rowSums(d6m) > 0 & rowSums(d6m) < length(R6)
+gc6 <- data.frame(gene = rownames(relcov)[v6],
+                  absent_in = apply(d6m[v6, , drop = FALSE], 1, function(r) paste(R6[r], collapse = ", ")),
+                  function_ = fun_of(rownames(relcov)[v6]))
+cat(sprintf("%d genes are present in some RNA-seq isolates and absent in others.\n", nrow(gc6)))
+kable(head(gc6, 80), row.names = FALSE)
+write.csv(gc6, file.path(out_dir, "rnaseq_isolates_gene_presence_absence.csv"), row.names = FALSE)
+```
+
+# 5. Protein-changing variation
+
+```{r hm-genes, eval=HAVE_GL}
+seg <- ve$n_alt > 0 & ve$n_alt < ve$n_called            # variable among isolates (not fixed vs reference)
+hm  <- ve[seg & ve$category %in% c("HIGH", "MODERATE"), ]
+gene_var <- hm %>% group_by(gene) %>%
+  summarise(HIGH = sum(category == "HIGH"), MODERATE = sum(category == "MODERATE"), total = n(),
+            effects = paste(head(unique(effect), 4), collapse = "; ")) %>%
+  arrange(desc(HIGH), desc(total)) %>% mutate(function_ = fun_of(gene))
+cat(sprintf("%d genes carry at least one segregating protein-changing variant (%d with HIGH impact).\n",
+            nrow(gene_var), sum(gene_var$HIGH > 0)))
+kable(head(gene_var, 40), caption = "Most variable genes (segregating HIGH / MODERATE variants)", row.names = FALSE)
+write.csv(gene_var, file.path(out_dir, "genes_protein_changing_variation.csv"), row.names = FALSE)
+
+gi2 <- ginfo %>% mutate(n_hm = gene_var$total[match(gene, gene_var$gene)], n_hm = ifelse(is.na(n_hm), 0, n_hm),
+                        has_hm = n_hm > 0)
+kable(gi2 %>% group_by(class = ifelse(cys_rich_SSP == 1, "Cys-rich SSP", ifelse(small_secreted == 1, "Small secreted",
+                                ifelse(signalP == 1, "Secreted (other)", "Not secreted")))) %>%
+        summarise(genes = n(), pct_with_protein_changes = 100 * mean(has_hm), mean_variants = mean(n_hm)),
+      digits = 2, caption = "Protein-changing variation by protein class")
+```
+
+## 5.1 Alleles that separate the aggressiveness groups (RNA-seq isolates)
+
+High = Xtra7, MNSS6; Low = WISS47, JS659. A variant "separates" the groups when both high isolates share one allele and both low isolates the other. With only 2 vs 2, many such alleles arise by chance from lineage, so the same count is shown for the other two ways of splitting these four isolates as a baseline.
+
+```{r separate, eval=HAVE_GL}
+g4 <- gt_of(c("Xtra7", "MNSS6", "WISS47", "JS659"))
+splits <- list(`High vs Low (real)` = list(c("Xtra7", "MNSS6"), c("WISS47", "JS659")),
+               `Xtra7+WISS47 vs MNSS6+JS659` = list(c("Xtra7", "WISS47"), c("MNSS6", "JS659")),
+               `Xtra7+JS659 vs MNSS6+WISS47` = list(c("Xtra7", "JS659"), c("MNSS6", "WISS47")))
+sep_rows <- function(a, b) {
+  A <- g4[, a, drop = FALSE]; B <- g4[, b, drop = FALSE]
+  (rowSums(A == "1") == 2 & rowSums(B == "0") == 2) | (rowSums(A == "0") == 2 & rowSums(B == "1") == 2)
+}
+cats <- c("HIGH", "MODERATE", "promoter1kb")
+base_tab <- do.call(rbind, lapply(names(splits), function(n) {
+  k <- sep_rows(splits[[n]][[1]], splits[[n]][[2]])
+  data.frame(split = n, HIGH = sum(k & ve$category == "HIGH"), MODERATE = sum(k & ve$category == "MODERATE"),
+             promoter1kb = sum(k & ve$category == "promoter1kb"),
+             genes = length(unique(ve$gene[k & ve$category %in% cats])))
+}))
+kable(base_tab, caption = "Separating variants: real grouping vs the two alternative groupings")
+k <- sep_rows(c("Xtra7", "MNSS6"), c("WISS47", "JS659")) & ve$category %in% cats
+sep <- ve[k, c("chrom", "pos", "ref", "alt", "gene", "category", "effect", "hgvs_p")]
+sep$high_allele <- ifelse(g4[k, "Xtra7"] == "1", "ALT", "ref")
+sep$function_ <- fun_of(sep$gene)
+write.csv(sep, file.path(out_dir, "variants_separating_high_vs_low.csv"), row.names = FALSE)
+kable(head(sep[order(match(sep$category, cats)), ], 60), row.names = FALSE,
+      caption = "Genes with alleles shared by both high-aggressive and absent from both low-aggressive isolates (or vice versa)")
+```
+
+# 6. Linking to the RNA-seq differentially expressed genes (Ch3)
+
+Put the pathogen DE tables from Ch3 (any `.csv`/`.tsv` with an `SS1G_` gene column or row names; optional `log2FoldChange`, `padj`) into **`~/SS_WGS/rnaseq_DE/`**. Each file is treated as one DE list. For every list, the report asks whether DE genes are more often genomically variable **among the six RNA-seq isolates** than genes overall — i.e. whether part of the expression differences has a cis-genetic explanation (gene absent, protein-changing allele, or promoter variant).
+
+```{r load-de}
+de_files <- if (dir.exists(rnaseq_dir)) list.files(rnaseq_dir, "\\.(csv|tsv|txt)$", full.names = TRUE) else character()
+read_de <- function(p) {
+  x <- if (grepl("\\.csv$", p)) read.csv(p, check.names = FALSE) else read.delim(p, check.names = FALSE)
+  cand <- c(list(rownames = rownames(x)), lapply(x, as.character))
+  hit  <- sapply(cand, function(v) mean(grepl("SS1G_[0-9]+", v)))
+  if (max(hit) < 0.5) return(NULL)
+  ids <- regmatches(cand[[which.max(hit)]], regexpr("SS1G_[0-9]+", cand[[which.max(hit)]]))
+  keep <- grepl("SS1G_[0-9]+", cand[[which.max(hit)]])
+  lfc  <- grep("log2FoldChange|^logFC$|log2FC", names(x), ignore.case = TRUE, value = TRUE)[1]
+  padj <- grep("^padj$|FDR|adj", names(x), ignore.case = TRUE, value = TRUE)[1]
+  out <- data.frame(gene = ids, log2FC = if (!is.na(lfc)) x[[lfc]][keep] else NA,
+                    padj = if (!is.na(padj)) x[[padj]][keep] else NA)
+  if (!is.na(padj)) out <- subset(out, !is.na(padj) & padj < 0.05)
+  out[!duplicated(out$gene), ]
+}
+de <- Filter(Negate(is.null), setNames(lapply(de_files, read_de), sub("\\.(csv|tsv|txt)$", "", basename(de_files))))
+HAVE_DE <- length(de) > 0
+if (HAVE_DE) kable(data.frame(DE_list = names(de), genes = sapply(de, nrow)), row.names = FALSE) else
+  cat("No DE tables found yet in", rnaseq_dir, "\n")
+```
+
+```{r de-enrich, eval=HAVE_DE && HAVE_GL, fig.height=5}
+all_genes <- ginfo$gene
+g6 <- gt_of(R6)
+v6var <- function(cats) {
+  k <- ve$category %in% cats & rowSums(g6 == "1") > 0 & rowSums(g6 == "0") > 0
+  unique(ve$gene[k])
+}
+sets <- list(`Protein-changing (HIGH/MODERATE)` = v6var(c("HIGH", "MODERATE")),
+             `Promoter (≤1 kb)` = v6var("promoter1kb"))
+if (HAVE_COV) sets$`Present/absent` <- gc6$gene
+res <- do.call(rbind, lapply(names(de), function(n) do.call(rbind, lapply(names(sets), function(s) {
+  inDE <- all_genes %in% de[[n]]$gene; inV <- all_genes %in% sets[[s]]
+  ft <- fisher.test(table(factor(inDE, c(FALSE, TRUE)), factor(inV, c(FALSE, TRUE))))
+  data.frame(DE_list = n, variation = s, DE_genes = sum(inDE), DE_variable = sum(inDE & inV),
+             pct_DE = 100 * mean(inV[inDE]), pct_background = 100 * mean(inV[!inDE]),
+             odds_ratio = unname(ft$estimate), p = ft$p.value)
+}))))
+res$FDR <- p.adjust(res$p, "BH")
+kable(res, digits = 3, row.names = FALSE)
+write.csv(res, file.path(out_dir, "DE_genes_genomic_variation_enrichment.csv"), row.names = FALSE)
+ggplot(res, aes(variation, pct_DE - pct_background, fill = FDR < 0.05)) + geom_col() + coord_flip() +
+  facet_wrap(~ DE_list) + geom_hline(yintercept = 0) +
+  scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "firebrick")) +
+  labs(x = NULL, y = "% DE genes variable minus % background genes variable") + theme_bw()
+```
+
+```{r de-explain, eval=HAVE_DE && HAVE_GL}
+carriers <- function(gene, cats) {
+  k <- ve$gene == gene & ve$category %in% cats
+  if (!any(k)) return("")
+  c6 <- g6[k, , drop = FALSE]
+  s <- R6[colSums(c6 == "1") > 0]
+  if (length(s) %in% c(0, length(R6))) "" else paste(s, collapse = ", ")
+}
+explain <- do.call(rbind, lapply(names(de), function(n) {
+  g <- de[[n]]$gene
+  data.frame(DE_list = n, gene = g, log2FC = de[[n]]$log2FC,
+             absent_in = if (HAVE_COV) gc6$absent_in[match(g, gc6$gene)] else NA,
+             protein_change_in = sapply(g, carriers, cats = c("HIGH", "MODERATE")),
+             promoter_variant_in = sapply(g, carriers, cats = "promoter1kb"),
+             function_ = fun_of(g))
+}))
+explain$absent_in[is.na(explain$absent_in)] <- ""
+explained <- subset(explain, nzchar(absent_in) | nzchar(protein_change_in) | nzchar(promoter_variant_in))
+cat(sprintf("%d of %d DE gene entries have a genomic difference among the six RNA-seq isolates.\n",
+            nrow(explained), nrow(explain)))
+kable(head(explained[order(nzchar(explained$absent_in), decreasing = TRUE), ], 80), row.names = FALSE, digits = 2)
+write.csv(explained, file.path(out_dir, "DE_genes_with_genomic_differences.csv"), row.names = FALSE)
+```
+
+How to read this: a pathogen gene that is DE between isolates **and** is absent in some isolates explains the expression difference trivially (no gene, no transcript). Genes with promoter or protein-changing alleles carried by the higher- (or lower-) expressing isolates are the cis-regulatory and functional candidates worth discussing in Ch3.
+
+# 7. Phenotype vs genotype across the panel (CH4)
+
+Needs `isolate_metadata.csv` with numeric phenotype columns (e.g. lesion length on each crop).
+
+```{r ch4, eval=!is.null(meta)}
+num <- names(meta)[sapply(meta, is.numeric) & !tolower(names(meta)) %in% c("year")]
+mm  <- meta[meta$isolate %in% iso & complete.cases(meta[, num, drop = FALSE]), ]
+if (length(num) && nrow(mm) >= 8) {
+  ph <- dist(scale(mm[, num, drop = FALSE])); gd <- as.dist(dist[mm$isolate, mm$isolate])
+  mt <- vegan::mantel(gd, ph, permutations = 9999)
+  cat(sprintf("Mantel test, SNP distance vs phenotype distance (%s), n = %d isolates: r = %.3f, p = %.4f\n",
+              paste(num, collapse = ", "), nrow(mm), mt$statistic, mt$signif))
+  mm$lineage <- lineage[mm$isolate]
+  for (v in num) {
+    kt <- kruskal.test(mm[[v]] ~ factor(mm$lineage))
+    print(ggplot(mm, aes(reorder(lineage, .data[[v]], median), .data[[v]])) + geom_boxplot(outlier.shape = NA) +
+            geom_jitter(width = 0.15) + labs(x = "Clonal lineage", y = v,
+            title = sprintf("%s by lineage (Kruskal-Wallis p = %.3g)", v, kt$p.value)) + theme_bw())
+  }
+} else cat("Add numeric phenotype columns for at least 8 isolates to run this section.\n")
+```
+
+# Appendix A — Data quality
+
+```{r qc, echo=FALSE}
+cov <- if (has(f("qc", "coverage_per_isolate.tsv"))) read.delim(f("qc", "coverage_per_isolate.tsv")) else NULL
+mp  <- if (has(f("qc", "mapping_rates.tsv"))) read.delim(f("qc", "mapping_rates.tsv")) else NULL
+bu  <- if (has(f("assembly", "busco_summary.tsv"))) read.delim(f("assembly", "busco_summary.tsv")) else NULL
+dc  <- if (has(f("assembly", "decontam_summary.tsv"))) read.delim(f("assembly", "decontam_summary.tsv")) else NULL
+an  <- if (has(f("annotation", "annotation_summary.tsv"))) read.delim(f("annotation", "annotation_summary.tsv")) else NULL
+q <- c(
+  if (!is.null(cov)) sprintf("Coverage after trimming: %.0f–%.0fx (median %.0fx).", min(cov$trim_coverage_x), max(cov$trim_coverage_x), median(cov$trim_coverage_x)),
+  if (!is.null(mp))  sprintf("Reads mapped to 1980 UF-70: %.1f–%.1f%%; genome breadth %.1f–%.1f%%.", min(mp$mapped_pct), max(mp$mapped_pct), min(mp$breadth_pct), max(mp$breadth_pct)),
+  if (!is.null(bu))  sprintf("De novo assemblies: BUSCO complete %.1f–%.1f%%, duplicated ≤ %.1f%% (no mixed cultures).", min(bu$complete_pct[bu$assembly != "Ss_ref"]), max(bu$complete_pct), max(bu$duplicated_pct[bu$assembly != "Ss_ref"])),
+  if (!is.null(dc))  sprintf("Bacterial contigs (%d isolates, %.1f–%.1f Mb) removed before annotation; cleaned assemblies %.1f–%.1f Mb.", sum(dc$removed_Mb > 1), min(dc$removed_Mb[dc$removed_Mb > 1]), max(dc$removed_Mb), min(dc$clean_Mb), max(dc$clean_Mb)),
+  if (!is.null(an))  sprintf("Predicted genes per isolate: %s–%s (median %s).", format(min(an$genes), big.mark=","), format(max(an$genes), big.mark=","), format(median(an$genes), big.mark=",")))
+cat(paste("-", q), sep = "\n")
+```
+
+# Appendix B — Exported tables
+
+```{r exported, echo=FALSE}
+kable(data.frame(file = list.files(out_dir)), row.names = FALSE)
+```
+
+All tables are in `~/SS_WGS/results/report_tables/`; figures in `~/SS_WGS/results/figures/`.
+
+```{r session, echo=FALSE}
 sessionInfo()
 ```
