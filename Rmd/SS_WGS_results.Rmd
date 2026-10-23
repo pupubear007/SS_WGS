@@ -429,24 +429,70 @@ How to read this: a pathogen gene that is DE between isolates **and** is absent 
 
 # 7. Phenotype vs genotype across the panel (CH4)
 
-Needs `isolate_metadata.csv` with numeric phenotype columns (e.g. lesion length on each crop).
+Uses `isolate_metadata.csv`: isolate-level aggressiveness (sAUDPC) on each crop from CH4 Figure 2
+(`soybean_sAUDPC`, `drybean_sAUDPC`, `sunflower_sAUDPC`, `canola_sAUDPC`) and colony growth on PDA.
 
-```{r ch4, eval=!is.null(meta)}
-num <- names(meta)[sapply(meta, is.numeric) & !tolower(names(meta)) %in% c("year")]
-mm  <- meta[meta$isolate %in% iso & complete.cases(meta[, num, drop = FALSE]), ]
-if (length(num) && nrow(mm) >= 8) {
-  ph <- dist(scale(mm[, num, drop = FALSE])); gd <- as.dist(dist[mm$isolate, mm$isolate])
-  mt <- vegan::mantel(gd, ph, permutations = 9999)
-  cat(sprintf("Mantel test, SNP distance vs phenotype distance (%s), n = %d isolates: r = %.3f, p = %.4f\n",
-              paste(num, collapse = ", "), nrow(mm), mt$statistic, mt$signif))
-  mm$lineage <- lineage[mm$isolate]
-  for (v in num) {
-    kt <- kruskal.test(mm[[v]] ~ factor(mm$lineage))
-    print(ggplot(mm, aes(reorder(lineage, .data[[v]], median), .data[[v]])) + geom_boxplot(outlier.shape = NA) +
-            geom_jitter(width = 0.15) + labs(x = "Clonal lineage", y = v,
-            title = sprintf("%s by lineage (Kruskal-Wallis p = %.3g)", v, kt$p.value)) + theme_bw())
-  }
-} else cat("Add numeric phenotype columns for at least 8 isolates to run this section.\n")
+```{r ch4-prep, eval=!is.null(meta)}
+traits <- names(meta)[sapply(meta, is.numeric) & !tolower(names(meta)) %in% "year"]
+aud    <- grep("sAUDPC", traits, value = TRUE)
+mm <- meta[meta$isolate %in% iso, , drop = FALSE]
+mm$lineage <- lineage[mm$isolate]
+cat(sprintf("%d of %d phenotyped isolates have genomes; traits: %s\n", nrow(mm), nrow(meta), paste(traits, collapse = ", ")))
+```
+
+## 7.1 Do genetically closer isolates have more similar aggressiveness? (Mantel tests)
+
+```{r ch4-mantel, eval=!is.null(meta)}
+mantel_one <- function(cols) {
+  ok <- complete.cases(mm[, cols, drop = FALSE]); x <- mm[ok, ]
+  if (nrow(x) < 8) return(NULL)
+  ph <- stats::dist(scale(x[, cols, drop = FALSE])); gd <- as.dist(dist[x$isolate, x$isolate])
+  mt <- vegan::mantel(gd, ph, method = "spearman", permutations = 9999)
+  data.frame(phenotype = if (length(cols) > 1) "all crops combined (sAUDPC)" else cols,
+             isolates = nrow(x), mantel_r = unname(mt$statistic), p = mt$signif)
+}
+mres <- do.call(rbind, c(lapply(traits, mantel_one), if (length(aud) > 1) list(mantel_one(aud))))
+kable(mres, digits = 3, row.names = FALSE,
+      caption = "Mantel test: genome-wide SNP distance vs phenotype distance (Spearman, 9,999 permutations)")
+write.csv(mres, file.path(out_dir, "mantel_genotype_vs_phenotype.csv"), row.names = FALSE)
+```
+
+A non-significant or weak correlation means aggressiveness is **not** predicted by genetic relatedness —
+consistent with the near-clonal pairs below.
+
+## 7.2 Aggressiveness within clonal lineages
+
+```{r ch4-clones, eval=!is.null(meta)}
+pairs <- t(combn(mm$isolate, 2))
+cp <- data.frame(a = pairs[, 1], b = pairs[, 2], SNPs = dist[pairs])
+cp <- cp[cp$SNPs < CLONE_SNPS, ]
+long <- NULL
+if (nrow(cp)) {
+  long <- do.call(rbind, lapply(aud, function(v) data.frame(
+    pair = paste(cp$a, "vs", cp$b), SNPs = cp$SNPs, crop = sub("_sAUDPC", "", v),
+    sAUDPC_a = mm[[v]][match(cp$a, mm$isolate)], sAUDPC_b = mm[[v]][match(cp$b, mm$isolate)])))
+  long$fold_difference <- pmax(long$sAUDPC_a, long$sAUDPC_b) / pmin(long$sAUDPC_a, long$sAUDPC_b)
+  write.csv(long, file.path(out_dir, "clonal_pairs_phenotype_differences.csv"), row.names = FALSE)
+  print(ggplot(long, aes(crop, fold_difference, group = pair, colour = pair)) +
+          geom_point(size = 3) + geom_line() + geom_hline(yintercept = 1, linetype = 2) +
+          labs(x = NULL, y = "Fold difference in sAUDPC between the two isolates",
+               title = "Aggressiveness differences between near-clonal isolates") + theme_bw())
+}
+if (is.null(long)) cat("No phenotyped isolate pairs fall within one clonal lineage.\n") else
+  kable(long, digits = 2, row.names = FALSE,
+        caption = sprintf("Near-clonal isolate pairs (< %d SNPs) that were both phenotyped", CLONE_SNPS))
+```
+
+## 7.3 Aggressiveness by lineage
+
+```{r ch4-lineage, eval=!is.null(meta), fig.height=4.5}
+ml <- mm %>% select(isolate, lineage, all_of(aud)) %>% pivot_longer(all_of(aud), names_to = "crop", values_to = "sAUDPC") %>%
+  mutate(crop = sub("_sAUDPC", "", crop))
+ggplot(ml, aes(lineage, sAUDPC)) + geom_boxplot(outlier.shape = NA, colour = "grey50") +
+  geom_point(aes(colour = lineage), size = 2.5) +
+  geom_text_repel(data = subset(ml, isolate %in% R6), aes(label = isolate), size = 2.6) +
+  facet_wrap(~ crop, nrow = 1) + scale_colour_manual(values = lin_col, guide = "none") +
+  labs(x = "Clonal lineage", y = "sAUDPC") + theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 # Appendix A — Data quality
