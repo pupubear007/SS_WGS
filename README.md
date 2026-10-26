@@ -64,3 +64,9 @@ and knit `Rmd/SS_WGS_results.Rmd` in RStudio.
   `20b` removes it before annotation. Variant calling is unaffected (bacterial reads do not map).
 - Genes with low read depth in Model_1980 (the reference strain) are treated as unmappable, not deleted.
 - funannotate runs without GeneMark; secreted-protein / KOG / InterPro labels come from the JGI annotation files (step 14).
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE).
+Sequencing reads and analysis results are not included in the repository and are not covered by this license.
+To cite this pipeline, see [`CITATION.cff`](CITATION.cff).
