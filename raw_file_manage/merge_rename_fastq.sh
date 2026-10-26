@@ -24,10 +24,10 @@
 # R1 and R2 are joined in the SAME lane order, so read pairs stay matched.
 # Originals are NOT deleted.
 #
-# Usage (from the script/ folder, so log/ is found):
-#   bash   merge_rename_fastq.sh --size      # size report only
-#   bash   merge_rename_fastq.sh --dry-run   # show the merge plan only
-#   sbatch merge_rename_fastq.sh             # run the merge
+# Usage (from the repo root, so log/ is found):
+#   bash   raw_file_manage/merge_rename_fastq.sh --size      # size report only
+#   bash   raw_file_manage/merge_rename_fastq.sh --dry-run   # show the merge plan only
+#   sbatch raw_file_manage/merge_rename_fastq.sh             # run the merge
 # ============================================================
 
 set -euo pipefail

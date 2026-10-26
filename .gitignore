@@ -4,3 +4,5 @@ rnaseq_DE/
 *.html
 .Rhistory
 Rmd/old/
+log/*
+!log/.keep

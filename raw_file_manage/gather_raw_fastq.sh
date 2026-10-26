@@ -9,17 +9,17 @@
 #SBATCH --time=04:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=wan00965@umn.edu
-#SBATCH --output=gather_WGS_fastq_%j.out
-#SBATCH --error=gather_WGS_fastq_%j.err
+#SBATCH --output=log/%x_%j.out
+#SBATCH --error=log/%x_%j.err
 
 # ============================================================
 # Step 1 (run on MSI): collect all raw WGS FASTQ from the batch
 # folders into ONE folder, then write an md5 manifest so the
 # local download can be verified.
 #
-# Usage:
-#   bash  gather_raw_fastq.sh --dry-run   # preview only, nothing moved
-#   sbatch gather_raw_fastq.sh            # move + md5 (as a SLURM job)
+# Usage (from the repo root, so log/ is found):
+#   bash   raw_file_manage/gather_raw_fastq.sh --dry-run   # preview only, nothing moved
+#   sbatch raw_file_manage/gather_raw_fastq.sh            # move + md5 (as a SLURM job)
 # ============================================================
 
 set -euo pipefail
