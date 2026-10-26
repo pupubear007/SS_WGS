@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use these scripts, please cite them as below."
+title: "SS_WGS: whole-genome analysis pipeline for Sclerotinia sclerotiorum isolates"
+type: software
+authors:
+  - family-names: Wang
+    given-names: Hsuan-Fu
+    affiliation: "Department of Plant Pathology, University of Minnesota"
+repository-code: "https://github.com/pupubear007/SS_WGS"
+license: MIT
+keywords:
+  - Sclerotinia sclerotiorum
+  - whole-genome sequencing
+  - variant calling
+  - genome assembly
+  - pangenome
+  - SLURM
